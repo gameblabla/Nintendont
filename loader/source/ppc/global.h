@@ -93,4 +93,6 @@ struct BTPadCont {
 #define WM_BUTTON_UP			0x0800
 #define WM_BUTTON_PLUS			0x1000
 
+
+
 #endif

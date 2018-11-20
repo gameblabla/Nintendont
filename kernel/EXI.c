@@ -58,6 +58,7 @@ static u32 SRAMWriteCount = 0;
 static u8 *const FontBuf = (u8*)(0x13100000);
 static u32 IPLReadOffset;
 bool EXI_IRQ = false;
+extern bool SO_IRQ;
 static u32 IRQ_Timer = 0;
 
 // EXI devices.
@@ -122,8 +123,8 @@ void EXIInit(void)
 	ambbBackupMem = malloca(0x10000, 0x40);
 	memset32(ambbBackupMem, 0xFF, 0x10000);
 
-	memset32((void*)EXI_BASE, 0, 0x20);
-	sync_after_write((void*)EXI_BASE, 0x20);
+	memset32((void*)EXI_BASE, 0, 0x100);
+	sync_after_write((void*)EXI_BASE, 0x100);
 
 	// Initialize SRAM.
 	SRAM_Init();
@@ -178,21 +179,24 @@ bool EXICheckTimer(void)
 {
 	return TimerDiffTicks(IRQ_Timer) > CurrentTiming;
 }
+
 void EXIInterrupt(void)
 {
-	write32( 0x10, IRQ_Cause[0] );
-	write32( 0x14, IRQ_Cause[1] );
-	write32( 0x18, IRQ_Cause[2] );
-	sync_after_write( (void*)0, 0x20 );
-	write32( EXI_INT, 0x10 ); // EXI IRQ
+	write32( EXI_CAUSE_0, IRQ_Cause[0] );
+	sync_after_write( (void*)EXI_CAUSE_0, 0x20 );
+	if(TRIGame != TRI_NONE)
+	{
+		write32( EXI_CAUSE_2, IRQ_Cause[1] );
+		sync_after_write( (void*)EXI_CAUSE_2, 0x20 );
+	}
+	write32(EXI_INT, 0x10); // EXI IRQ
 	sync_after_write( (void*)EXI_INT, 0x20 );
-	write32( HW_IPC_ARMCTRL, 8 ); //throw irq
-	//dbgprintf("EXI Interrupt\r\n");
+	write32( HW_IPC_ARMCTRL, (1<<0) | (1<<4) ); //throw irq
+	dbgprintf("EXI Interrupt\r\n");
 	EXI_IRQ = false;
 	IRQ_Timer = 0;
 	IRQ_Cause[0] = 0;
 	IRQ_Cause[1] = 0;
-	IRQ_Cause[2] = 0;
 }
 
 void EXIShutdown(void)
@@ -690,9 +694,190 @@ u32 EXIDeviceSP1( u8 *Data, u32 Length, u32 Mode )
 	return 0;
 }
 
+u32 EXIDeviceETH( u8 *Data, u32 Length, u32 Mode )
+{
+	u32 slot = 0;
+#ifdef DEBUG_EXI
+	dbgprintf("EXIDeviceETH\r\n");
+#endif
+	u32 EXIOK = 1;
+	//u32 read, wrote;
+
+	if( Mode == 1 )		// Write
+	{
+		switch( Length )
+		{
+			case 1:
+			{
+				if( EXICommand[0] == MEM_BLOCK_READ || EXICommand[0] == MEM_BLOCK_WRITE )
+					break;
+
+				switch( (u32)Data >> 24 )
+				{
+					case 0x00:
+					{
+						EXICommand[0] = MEM_READ_ID_NINTENDO;
+#ifdef DEBUG_EXI
+						dbgprintf("EXI: ETHGetDeviceIDNintendo()\r\n");
+#endif
+					} break;
+#ifdef DEBUG_EXI					
+					case 0x89:
+					{
+						dbgprintf("EXI: ETHClearStatus()\r\n");
+					} break;
+#endif
+				}
+			} break;
+			case 2:
+			{
+				switch( (u32)Data >> 16 )
+				{
+					case 0x0000:
+					{
+						EXICommand[0] = MEM_READ_ID;
+#ifdef DEBUG_EXI
+						dbgprintf("EXI: ETHGetDeviceID()\r\n");
+#endif
+					} break;
+					case 0x8300:	//
+					{
+						EXICommand[0] = MEM_READ_STATUS;
+#ifdef DEBUG_EXI
+						dbgprintf("EXI: ETHReadStatus()\r\n");
+#endif
+					} break;
+#ifdef DEBUG_EXI
+					case 0x8101:
+					{
+						dbgprintf("EXI: ETHIRQEnable()\r\n");
+					} break;
+					case 0x8100:
+					{
+						dbgprintf("EXI: ETHIRQDisable()\r\n");
+					} break;
+#endif
+				}
+			} break;
+			case 3:
+			{
+				switch( (u32)Data >> 24 )
+				{
+					case 0xF1:
+					{
+						GCNCard_SetBlockOffset_Erase(slot, (u32)Data);
+#ifdef DEBUG_EXI
+						dbgprintf("EXI: ETHErasePage(%08X)\r\n", BlockOff );
+#endif
+						EXICommand[0] = MEM_BLOCK_ERASE;
+						IRQ_Cause[0] = 2;			// EXI IRQ
+						EXIOK = 2;
+					} break;
+				}
+			} break;
+			case 4:
+			{
+				if( EXICommand[0] == MEM_BLOCK_READ || EXICommand[0] == MEM_BLOCK_WRITE )
+					break;
+
+				switch( (u32)Data >> 24 )
+				{
+					case 0xF1:
+					{
+						GCNCard_SetBlockOffset(slot, (u32)Data);
+#ifdef DEBUG_EXI
+						dbgprintf("EXI: ETHErasePage(%08X)\r\n", BlockOff );
+#endif
+						EXICommand[0] = MEM_BLOCK_ERASE;
+						IRQ_Cause[0] = 2;			// EXI IRQ
+						EXIOK = 2;
+					} break;
+					case 0xF2:
+					{
+						GCNCard_SetBlockOffset(slot, (u32)Data);
+#ifdef DEBUG_EXI
+						dbgprintf("EXI: ETHWritePage(%08X)\r\n", BlockOff );
+#endif
+						EXICommand[0] = MEM_BLOCK_WRITE;
+					} break;
+					case 0x52:
+					{
+						GCNCard_SetBlockOffset(slot, (u32)Data);
+#ifdef DEBUG_EXI
+						dbgprintf("EXI: ETHReadPage(%08X)\r\n", BlockOff );
+#endif
+
+						EXICommand[0] = MEM_BLOCK_READ;
+					} break;
+#ifdef DEBUG_EXI
+					default:
+					{
+						dbgprintf("EXI: Unknown:%08x Line:%u\r\n", (u32)Data, __LINE__ );
+					//	Shutdown();
+					} break;
+#endif
+				}			
+			} break;
+			default:
+			{
+				switch( EXICommand[0] )
+				{
+					case MEM_BLOCK_WRITE:
+					{
+						GCNCard_Write(slot, Data, Length);
+						IRQ_Cause[0] = 10;	// TC(8) & EXI(2) IRQ
+						EXIOK = 2;
+					} break;
+				}
+			} break;
+		}
+
+	} else {			// Read
+
+		switch( EXICommand[0] )
+		{
+			case MEM_READ_ID_NINTENDO:
+			case MEM_READ_ID:
+			{
+				write32( EXI_CMD_1, EXI_DEVTYPE_ETHER );
+#ifdef DEBUG_EXI
+				dbgprintf("EXI: ETHReadID(%X)\r\n", read32(EXI_CMD_1) );
+#endif
+			} break;
+			case MEM_READ_STATUS:
+			{
+				write32( EXI_CMD_1, 0x41 );	// Unlocked(0x40) and Ready(0x01)
+#ifdef DEBUG_EXI
+				dbgprintf("EXI: ETHReadStatus(%X)\r\n", read32(EXI_CMD_1) );
+#endif
+			} break;
+			case MEM_BLOCK_READ:
+			{
+			//	f_lseek( &MemCard, BlockOff );
+			//	f_read( &MemCard, Data, Length, &read );
+				GCNCard_Read(slot, Data, Length);
+
+				IRQ_Cause[0] = 8;		// TC IRQ
+
+				EXIOK = 2;
+			} break;
+		}
+	}
+	//dbgprintf("%08x %08x %08x %08x\r\n", (u32)Data >> 16, Mode, Length, EXICommand);
+	write32( EXI_CMD_0, 0 ); //exit EXIDMA / EXIImm
+	sync_after_write( (void*)EXI_BASE, 0x20 );
+
+	if( EXIOK == 2 )
+	{
+		EXI_IRQ = true;
+		IRQ_Timer = read32(HW_TIMER);
+	}
+	return 1;
+}
+
 void EXIUpdateRegistersNEW( void )
 {
-	if( EXI_IRQ == true ) //still working
+	if( EXI_IRQ == true || SO_IRQ == true || (read32(EXI_INT) & 0x2010) ) //still working
 		return;
 
 	//u32 chn, dev, frq, ret, data, len, mode;
@@ -779,9 +964,12 @@ void EXIUpdateRegistersNEW( void )
 						break;
 
 					case EXI_DEV_SP1:
+						if(TRIGame != TRI_NONE)
 						EXIDeviceSP1( (u8*)data, len, mode );
+						else
+						EXIDeviceETH( (u8*)data, len, mode );
 						break;
-
+						
 					default:
 #ifdef DEBUG_SRAM
 						dbgprintf("EXI: EXIImm: Unhandled device: Ch%u, Dev%u\r\n", chn, EXIDeviceSelect[chn&3]);
@@ -818,7 +1006,10 @@ void EXIUpdateRegistersNEW( void )
 #ifdef DEBUG_SRAM
 						hexdump( ptr, len );
 #endif
+						if(TRIGame != TRI_NONE)
 						EXIDeviceSP1( ptr, len, mode );
+						else
+						EXIDeviceETH( ptr, len, mode );
 						break;
 
 					default:
